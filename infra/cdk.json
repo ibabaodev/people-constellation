@@ -1,0 +1,11 @@
+﻿{
+  "app": "node dist/bin/app.js",
+  "watch": { "include": ["../backend/src/**/*.ts", "bin/**/*.ts", "lib/**/*.ts"], "exclude": ["README.md", "cdk*.json", "**/*.d.ts", "**/*.js", "**/*.js.map", "node_modules", "dist"] },
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-lambda:recognizeVersionProps": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-apigateway:authorizerChangeDeploymentLogicalId": true,
+    "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false
+  }
+}
