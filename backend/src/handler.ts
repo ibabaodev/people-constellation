@@ -1,5 +1,5 @@
 ﻿import { randomUUID } from 'node:crypto'
-import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from 'aws-lambda'
+import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb'
 
@@ -9,17 +9,17 @@ const db = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions
 type RecordRow = Record<string, unknown> & { PK: string; SK: string }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 const response = (statusCode: number, body: unknown): APIGatewayProxyStructuredResultV2 => ({ statusCode, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify(body) })
-const jsonBody = (event: APIGatewayProxyEventV2): Record<string, unknown> => { if (!event.body) throw new HttpError(400, 'Request body is required'); try { const value: unknown = JSON.parse(event.body); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); return value as Record<string, unknown> } catch { throw new HttpError(400, 'Request body must be valid JSON') } }
+const jsonBody = (event: APIGatewayProxyEventV2WithJWTAuthorizer): Record<string, unknown> => { if (!event.body) throw new HttpError(400, 'Request body is required'); try { const value: unknown = JSON.parse(event.body); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(); return value as Record<string, unknown> } catch { throw new HttpError(400, 'Request body must be valid JSON') } }
 const str = (value: unknown, field: string, max = 200): string => { if (typeof value !== 'string' || !value.trim() || value.length > max) throw new HttpError(400, `${field} is required and must be under ${max} characters`); return value.trim() }
 const rels = new Set(['family', 'friend', 'coworker', 'other'])
 const personInput = (body: Record<string, unknown>) => { const name = str(body.name, 'name', 80); const relationship = str(body.relationship, 'relationship', 20); if (!rels.has(relationship)) throw new HttpError(400, 'relationship must be family, friend, coworker, or other'); const notes = body.notes === undefined ? undefined : typeof body.notes === 'string' && body.notes.length <= 2000 ? body.notes : str(body.notes, 'notes', 2000); const lastContact = body.lastContact === undefined || body.lastContact === null || body.lastContact === '' ? undefined : str(body.lastContact, 'lastContact', 10); if (lastContact && !/^\d{4}-\d{2}-\d{2}$/.test(lastContact)) throw new HttpError(400, 'lastContact must use YYYY-MM-DD format'); const position = body.position ?? { x: 100, y: 100 }; if (!position || typeof position !== 'object' || typeof (position as Record<string, unknown>).x !== 'number' || typeof (position as Record<string, unknown>).y !== 'number' || !Number.isFinite((position as {x:number}).x) || !Number.isFinite((position as {y:number}).y)) throw new HttpError(400, 'position must contain numeric x and y'); return { name, relationship, ...(notes === undefined ? {} : { notes }), ...(lastContact ? { lastContact } : {}), position: { x: (position as {x:number}).x, y: (position as {y:number}).y } } }
-const owner = (event: APIGatewayProxyEventV2) => { const sub = event.requestContext.authorizer?.jwt?.claims?.sub; if (typeof sub !== 'string' || !sub) throw new HttpError(401, 'A valid Google sign-in token is required'); return `USER#${sub}` }
-const pathId = (event: APIGatewayProxyEventV2) => str(event.pathParameters?.id, 'id', 100)
+const owner = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => { const sub = event.requestContext.authorizer?.jwt?.claims?.sub; if (typeof sub !== 'string' || !sub) throw new HttpError(401, 'A valid Google sign-in token is required'); return `USER#${sub}` }
+const pathId = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => str(event.pathParameters?.id, 'id', 100)
 const getRow = async (pk: string, sk: string) => (await db.send(new GetCommand({ TableName: table, Key: { PK: pk, SK: sk }, ConsistentRead: true }))).Item as RecordRow | undefined
 const query = async (pk: string, prefix: string) => { const items: RecordRow[] = []; let key: Record<string, unknown> | undefined; do { const page = await db.send(new QueryCommand({ TableName: table, KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)', ExpressionAttributeValues: { ':pk': pk, ':prefix': prefix }, ExclusiveStartKey: key })); items.push(...(page.Items as RecordRow[] ?? [])); key = page.LastEvaluatedKey } while (key); return items }
 const itemData = (row: RecordRow) => { const { PK: _pk, SK: _sk, ...data } = row; return data }
 
-export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> => {
+export const handler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyStructuredResultV2> => {
   try {
     const pk = owner(event); const method = event.requestContext.http.method; const path = event.rawPath.replace(/\/$/, '') || '/'
     if (path === '/people' && method === 'GET') return response(200, { items: (await query(pk, 'PERSON#')).map(itemData) })
@@ -38,5 +38,6 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
     return response(404, { error: 'Route not found' })
   } catch (error) { if (error instanceof HttpError) return response(error.status, { error: error.message }); if ((error as { name?: string }).name === 'ConditionalCheckFailedException' || (error as { name?: string }).name === 'TransactionCanceledException') return response(409, { error: 'This item changed since you loaded it. Refresh and try again.' }); console.error('Request failed', error); return response(500, { error: 'Something went wrong while saving your constellation.' }) }
 }
+
 
 
