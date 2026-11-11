@@ -1,6 +1,8 @@
-﻿let idToken: string | null = null
+﻿const TOKEN_KEY = 'people-constellation-google-session'
+let idToken: string | null = sessionStorage.getItem(TOKEN_KEY)
 const apiUrl = import.meta.env.VITE_API_URL?.replace(/\/$/, '')
-export function setIdToken(token: string | null) { idToken = token }
+export function setIdToken(token: string | null) { idToken = token; if (token) sessionStorage.setItem(TOKEN_KEY, token); else sessionStorage.removeItem(TOKEN_KEY) }
+export function getIdToken() { return idToken }
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!apiUrl) throw new Error('Set VITE_API_URL in .env.local to use cloud sync.')
   if (!idToken) throw new Error('Sign in with Google to use cloud sync.')
@@ -16,7 +18,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 export type RemotePerson = { id: string; name: string; relationship: 'family' | 'friend' | 'coworker' | 'other'; notes?: string; lastContact?: string; position: { x: number; y: number }; createdAt: string; updatedAt: string; version: number }
 export type RemoteConnection = { id: string; source: string; target: string }
-export type RemoteActivity = { id: string; personId: string; date: string; personVersion?: number }
+export type RemoteActivity = { id: string; personId: string; date: string; createdAt?: string; previousLastContact?: string | null; personVersion?: number }
 export const api = {
   people: () => request<{ items: RemotePerson[] }>('/people'),
   createPerson: (person: Omit<RemotePerson, 'id' | 'createdAt' | 'updatedAt' | 'version'>) => request<RemotePerson>('/people', { method: 'POST', body: JSON.stringify(person) }),
@@ -27,6 +29,7 @@ export const api = {
   deleteConnection: (id: string) => request<void>(`/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   activities: (personId: string) => request<{ items: RemoteActivity[] }>(`/people/${encodeURIComponent(personId)}/activities`),
   addActivity: (personId: string, date: string) => request<RemoteActivity>(`/people/${encodeURIComponent(personId)}/activities`, { method: 'POST', body: JSON.stringify({ date }) }),
+  deleteActivity: (personId: string, activityId: string) => request<{ lastContact: string | null; personVersion: number }>(`/people/${encodeURIComponent(personId)}/activities/${encodeURIComponent(activityId)}`, { method: 'DELETE' }),
 }
 
 
