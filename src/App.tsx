@@ -13,10 +13,10 @@ const today = new Date()
 const now = () => new Date().toISOString()
 const emptyData = (): Data => ({ people: [], connections: [], activities: [] })
 const labels = relationshipLabels
-const pathForView = (view: string) => view === 'All people' ? '/people' : view === 'Recent connections' ? '/recent' : '/'
-const viewForPath = (path: string) => path === '/people' ? 'All people' : path === '/recent' ? 'Recent connections' : 'My constellation'
+const pathForView = (view: string) => view === 'Recent connections' ? '/recent' : '/'
+const viewForPath = (path: string) => path.startsWith('/people') ? 'All people' : path === '/recent' ? 'Recent connections' : 'My constellation'
 const relationshipKeys = ['all', 'family', 'friend', 'coworker', 'other']
-const filterForUrl = () => { const value = new URLSearchParams(window.location.search).get('filter'); return value && relationshipKeys.includes(value) ? value : 'all' }
+const filterForUrl = () => { const routeValue = window.location.pathname.split('/')[2]; const queryValue = new URLSearchParams(window.location.search).get('filter'); const value = relationshipKeys.includes(routeValue) ? routeValue : queryValue; return value && relationshipKeys.includes(value) ? value : 'all' }
 const personForUrl = () => new URLSearchParams(window.location.search).get('person')
 const fromRemote = (person: RemotePerson): Person => ({ ...person, x: person.position.x, y: person.position.y })
 const recencyScore = (date?: string) => Math.exp(-(daysSince(date) ?? 730) / 180)
@@ -52,12 +52,13 @@ function App() {
   const panDrag = useRef<{ pointer: number; startX: number; startY: number; panX: number; panY: number } | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const googleCallback = useRef<(credential: string) => void>(() => {})
+  const signInInProgress = useRef(false)
+  const loadedActivityPeople = useRef(new Set<string>())
   const selectedPerson = data.people.find(p => p.id === selected) ?? null
   const navigateView = (next: string, nextFilter = filter) => {
     setView(next)
     setFilter(nextFilter)
-    const path = pathForView(next)
-    const url = `${path}?filter=${encodeURIComponent(nextFilter)}`
+    const url = `${pathForView(next)}?filter=${encodeURIComponent(nextFilter)}`
     if (`${window.location.pathname}${window.location.search}` !== url) window.history.pushState({}, '', url)
   }
   useEffect(() => {
@@ -69,7 +70,8 @@ function App() {
     const params = new URLSearchParams()
     params.set('filter', filter)
     if (selected) params.set('person', selected)
-    const url = `${pathForView(view)}?${params.toString()}`
+    const query = params.toString()
+    const url = `${pathForView(view)}?${query}`
     if (`${window.location.pathname}${window.location.search}` !== url) window.history.replaceState({}, '', url)
   }, [view, filter, selected])
   useEffect(() => {
@@ -105,6 +107,16 @@ function App() {
     }, 100)
     return () => window.clearInterval(timer)
   }, [])
+  useEffect(() => {
+    if (!signedIn || !selected || loadedActivityPeople.current.has(selected)) return
+    loadedActivityPeople.current.add(selected)
+    void api.activities(selected).then(result => {
+      setData(prev => ({ ...prev, activities: [...prev.activities.filter(activity => activity.personId !== selected), ...result.items] }))
+    }).catch(error => {
+      loadedActivityPeople.current.delete(selected)
+      setToast(error instanceof Error ? error.message : 'Could not load recent moments.')
+    })
+  }, [selected, signedIn])
   const visiblePeople = useMemo(() => data.people.filter(p => (filter === 'all' || p.relationship === filter) && p.name.toLowerCase().includes(query.toLowerCase()) && (view !== 'Recent connections' || (daysSince(p.lastContact) ?? 999) <= 30)), [data.people, filter, query, view])
   const visibleIds = new Set(visiblePeople.map(p => p.id))
   const counts = { total: data.people.length, recent: data.people.filter(p => (daysSince(p.lastContact) ?? 999) <= 7).length, needs: data.people.filter(p => (daysSince(p.lastContact) ?? 0) > 30).length }
@@ -122,19 +134,23 @@ function App() {
     }
   }
   const signInWithGoogle = useCallback(async (credential: string, showToast = true) => {
+    if (signInInProgress.current) return
+    signInInProgress.current = true
     setAuthError(''); setSyncStatus('Loading your constellation…'); setIdToken(credential); setAccount(googleProfile(credential))
     try {
       const [peopleResult, connectionsResult] = await Promise.all([api.people(), api.connections()])
-      const activities = await Promise.all(peopleResult.items.map(person => api.activities(person.id)))
-      const cloudData: Data = { people: peopleResult.items.map(fromRemote), connections: connectionsResult.items, activities: activities.flatMap(result => result.items) }
-      setData(cloudData); const requestedPerson = personForUrl(); setSelected(requestedPerson && cloudData.people.some(person => person.id === requestedPerson) ? requestedPerson : cloudData.people[0]?.id ?? null); setSignedIn(true); setSyncStatus('Synced'); if (showToast) setToast('Google account connected')
+      const cloudData: Data = { people: peopleResult.items.map(fromRemote), connections: connectionsResult.items, activities: [] }
+      loadedActivityPeople.current.clear()
+      setData(cloudData); const requestedPerson = personForUrl(); setSelected(requestedPerson && cloudData.people.some(person => person.id === requestedPerson) ? requestedPerson : null); setSignedIn(true); setSyncStatus('Synced'); if (showToast) setToast('Google account connected')
     } catch (error) {
       setIdToken(null); setAccount({}); setData(emptyData()); setSignedIn(false); setSyncStatus('Sign in required'); setAuthError(error instanceof Error ? error.message : 'Google sign-in could not reach the API.')
+    } finally {
+      signInInProgress.current = false
     }
   }, [])
   useEffect(() => { googleCallback.current = signInWithGoogle }, [signInWithGoogle])
   useEffect(() => { const token = getIdToken(); if (token) void Promise.resolve().then(() => signInWithGoogle(token, false)) }, [signInWithGoogle])
-  const signOut = () => { setIdToken(null); setAccount({}); setSignedIn(false); setData(emptyData()); setSelected(null); setSyncStatus('Sign in required'); setToast('Signed out') }
+  const signOut = () => { loadedActivityPeople.current.clear(); setIdToken(null); setAccount({}); setSignedIn(false); setData(emptyData()); setSelected(null); setSyncStatus('Sign in required'); setToast('Signed out') }
   const startAdd = () => { setForm({ name: '', relationship: 'friend', lastContact: '', notes: '' }); setModal('add') }
   const startEdit = () => { if (!selectedPerson) return; setForm({ name: selectedPerson.name, relationship: selectedPerson.relationship, lastContact: selectedPerson.lastContact ?? '', notes: selectedPerson.notes ?? '' }); setModal('edit') }
   const saveForm = async (e: React.FormEvent) => {
@@ -172,7 +188,7 @@ function App() {
       <div className="brand"><span className="brand-mark"><img src={logo} alt="" /></span><span>people<span className="brand-light">constellation</span></span></div>
       <div className="workspace-label">YOUR UNIVERSE</div>
       <nav className="nav-list" aria-label="Main navigation">
-        {[['✧', 'My constellation'], ['☼', 'All people'], ['◷', 'Recent connections']].map(([icon, name]) => <button key={name} className={`nav-item ${view === name ? 'active' : ''}`} onClick={() => { navigateView(name, 'all') }}><span className="nav-icon">{icon}</span>{name}{name === 'All people' && <span className="nav-count">{data.people.length}</span>}</button>)}
+        {[['✧', 'My constellation'], ['◷', 'Recent connections']].map(([icon, name]) => <button key={name} className={`nav-item ${view === name || (name === 'My constellation' && view === 'All people') ? 'active' : ''}`} onClick={() => { navigateView(name, 'all') }}><span className="nav-icon">{icon}</span>{name}{name === 'All people' && <span className="nav-count">{data.people.length}</span>}</button>)}
       </nav>
       <div className="sidebar-rule" />
       <div className="workspace-label">RELATIONSHIPS</div>
@@ -180,22 +196,22 @@ function App() {
       <div className="sidebar-bottom"><div className="profile">{account.picture ? <img className="avatar account-avatar" src={account.picture} alt="" referrerPolicy="no-referrer" /> : <div className="avatar">{(account.name ?? account.email ?? 'G').charAt(0).toUpperCase()}</div>}<div className="profile-text"><strong>{account.name ?? account.email ?? 'Google account'}</strong><small>{account.email ?? 'Cloud constellation'}</small></div><button className="more-button" aria-label="Sign out" title="Sign out" onClick={signOut}>↪</button></div></div>
     </aside>
     <section className="main-area">
-      <header className="topbar"><div className="breadcrumb">Your space <span>/</span> <strong>{view}</strong></div><div className="top-actions"><span className="saved-indicator"><i />{syncStatus}</span><button className="edit-button" onClick={signOut}>Sign out</button></div></header>
+      <header className="topbar"><div className="breadcrumb">Your space <span>/</span> <strong>{view === 'All people' ? 'My constellation' : view}</strong></div><div className="top-actions"><span className="saved-indicator"><i />{syncStatus}</span><button className="edit-button" onClick={signOut}>Sign out</button></div></header>
       <div className="page-content">
-        <section className="welcome-row"><div><div className="eyebrow"><span>✦</span> YOUR PERSONAL UNIVERSE</div><h1>{view === 'Recent connections' ? 'Recent connections' : view === 'All people' ? 'Everyone in your constellation' : 'A sky full of your people'}</h1><p className="subhead">Every connection has its own place in your universe.</p></div><button className="primary-button" onClick={startAdd}><span>＋</span> Add a person</button></section>
+        <section className="welcome-row"><div><h1>{view === 'Recent connections' ? 'Recent connections' : view === 'All people' ? 'Everyone in your constellation' : 'A sky full of your people'}</h1><p className="subhead">Every connection has its own place in your universe.</p></div><button className="primary-button" onClick={startAdd}><span>＋</span> Add a person</button></section>
         <section className="sky-panel">
           <div className="sky-toolbar"><div className="sky-title"><span className="live-dot" />YOUR CONSTELLATION</div><div className="toolbar-actions"><label className="search-box"><span>⌕</span><input aria-label="Search people" placeholder="Find someone..." value={query} onChange={e => setQuery(e.target.value)} /><kbd>⌘ K</kbd></label><button className={`tool-button ${showLines ? 'tool-active' : ''}`} title="Toggle connection lines" onClick={() => setShowLines(!showLines)}>⌁</button><button className={`tool-button ${connectMode ? 'tool-active' : ''}`} title="Connect two stars" onClick={() => { setConnectMode(!connectMode); setSelected(selected ?? visiblePeople[0]?.id ?? null) }}>⟷</button><button className="tool-button zoom-icon" title="Zoom out" aria-label="Zoom out" onClick={() => setZoom(value => Math.max(0.5, +(value - 0.25).toFixed(2)))}><span aria-hidden="true">−</span></button><span className="zoom-level" aria-live="polite">{Math.round(zoom * 100)}%</span><button className="tool-button zoom-icon" title="Zoom in" aria-label="Zoom in" onClick={() => setZoom(value => Math.min(2.5, +(value + 0.25).toFixed(2)))}><span aria-hidden="true">+</span></button><button className="tool-button reset-zoom" title="Reset canvas view" aria-label="Reset canvas view" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }) }}><span aria-hidden="true">↺</span></button></div></div>
           <div ref={stageRef} className={`sky-stage ${connectMode ? 'connect-mode' : ''}`}>
             <div className="sky-grid" /><div className="sky-glow glow-one" /><div className="sky-glow glow-two" /><div className="sky-glow glow-three" />
             <div className="stage-caption"><span>✧</span> {connectMode ? 'Choose another star to connect' : 'DRAG STARS TO FIND THEIR PLACE'} <span className="caption-sep">·</span> {visiblePeople.length} STARS</div>
             {visiblePeople.length === 0 && <div className="empty-sky"><div>?</div><strong>{data.people.length === 0 ? 'Your universe is waiting' : 'No people match these filters'}</strong><span>{data.people.length === 0 ? 'Add someone to see their star appear here.' : 'Try another relationship, or clear your search and filters.'}</span>{data.people.length === 0 ? <button className="primary-button" onClick={startAdd}>? Add your first person</button> : <button className="primary-button" onClick={() => { setQuery(''); navigateView('All people', 'all') }}>Show everyone</button>}</div>}
-            <svg className="constellation-svg" viewBox={`${pan.x} ${pan.y} ${1000 / zoom} ${700 / zoom}`} preserveAspectRatio="none" aria-label="Interactive constellation of people. Drag empty space to pan." onPointerDown={handleCanvasDown} onPointerMove={handleMove} onPointerUp={endDrag} onPointerCancel={endDrag} onClick={() => { if (!connectMode) setSelected(null) }}>
+            <svg className="constellation-svg" viewBox={`${pan.x} ${pan.y} ${1000 / zoom} ${700 / zoom}`} preserveAspectRatio="xMidYMid meet" aria-label="Interactive constellation of people. Drag empty space to pan." onPointerDown={handleCanvasDown} onPointerMove={handleMove} onPointerUp={endDrag} onPointerCancel={endDrag} onClick={() => { if (!connectMode) setSelected(null) }}>
               <g className="connections">{showLines && data.connections.filter(c => visibleIds.has(c.source) && visibleIds.has(c.target)).map(c => { const a = data.people.find(p => p.id === c.source), b = data.people.find(p => p.id === c.target); return a && b ? <line key={c.id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className={selected === a.id || selected === b.id ? 'connection focused' : 'connection'} /> : null })}</g>
               {visiblePeople.map(p => { const t = tone(p.lastContact); const isSelected = selected === p.id; const size = starScale(p.lastContact); const brightness = recencyScore(p.lastContact); return <g key={p.id} className={`star-node relationship-${p.relationship} recency-${t} ${isSelected ? 'selected' : ''}`} transform={`translate(${p.x} ${p.y})`} onPointerDown={e => handleStarDown(e, p)} onClick={e => { e.stopPropagation(); if (!connectMode) setSelected(p.id) }} role="button" aria-label={`${p.name}, ${labels[p.relationship]}, ${ageLabel(p.lastContact)}`} tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(p.id) } }}>
                 <g transform={`scale(${size})`}><circle className="star-halo" r="34" style={{ opacity: 0.025 + brightness * 0.15 }} /><circle className="star-orbit" r="24" style={{ opacity: 0.1 + brightness * 0.22 }} /><circle className="star-core" r={isSelected ? 8 : 6} style={{ opacity: 0.4 + brightness * 0.6, filter: `drop-shadow(0 0 ${3 + brightness * 7}px currentColor)` }} /><path className="star-cross" d="M0 -17 L0 17 M-17 0 L17 0" style={{ opacity: 0.3 + brightness * 0.42 }} /></g><circle className="star-hit" r="40" /><text className="star-name" x="0" y={47 * size} textAnchor="middle" fontSize={12 / size}>{p.name.split(' ')[0]}</text>
               </g> })}
             </svg>
-            <div className="map-legend"><span><i className="legend-dot bright" />Just connected</span><span><i className="legend-dot mid-bright" />Recently</span><span><i className="legend-dot soft-bright" />A little while</span><span><i className="legend-dot dim-bright" />Longer ago</span></div>
+            <div className="map-legend"><span className="legend-explanation">Star brightness shows how recently you connected.</span></div>
             <div className="stage-controls"><button onClick={() => setToast('Drag the stars to arrange your sky')} title="Help">?</button><button onClick={() => setShowLines(!showLines)} title="Toggle connections">⌁</button></div>
           </div>
           <div className="sky-footer"><span><span className="grab-hint">⠿</span> Click and drag to rearrange your constellation</span><span>YOUR SPACE IS PRIVATE <span className="lock">⌑</span></span></div>
